@@ -11,17 +11,22 @@ let roomCode = '';
 let connections = {}; // peerId -> DataConnection
 let gameState = null;
 let myPlayerId = null; // seat index
-let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 5;
+let heartbeatInterval = null;
 
-// PeerJS Configuration for Stability
-// Using the public PeerJS cloud server
+// PeerJS Configuration
+// Using reliable: true and increased debug levels for troubleshooting
 const PEER_CONFIG = {
   host: '0.peerjs.com',
   port: 443,
   path: '/',
   secure: true,
-  debug: 2 // 2 = Errors and Warnings
+  debug: 1, // Minimize console noise unless necessary
+  config: {
+    'iceServers': [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ]
+  }
 };
 
 // ---- Tab switching ----
@@ -31,6 +36,25 @@ function switchTab(tab) {
   });
   document.getElementById('tab-host').classList.toggle('active', tab === 'host');
   document.getElementById('tab-join').classList.toggle('active', tab === 'join');
+}
+
+// ---- Peer Lifecycle Management ----
+function cleanupPeer() {
+  if (heartbeatInterval) clearInterval(heartbeatInterval);
+  if (peer) {
+    peer.destroy();
+    peer = null;
+  }
+}
+
+function startHeartbeat() {
+  if (heartbeatInterval) clearInterval(heartbeatInterval);
+  heartbeatInterval = setInterval(() => {
+    if (peer && !peer.destroyed && !peer.disconnected) {
+      // Internal PeerJS ping logic to keep socket alive
+      peer.socket.send({ type: 'HEARTBEAT' });
+    }
+  }, 5000);
 }
 
 // ---- Lobby: Host ----
@@ -55,36 +79,30 @@ function joinGame() {
 
   myName = name;
   isHost = false;
-  roomCode = code;
+  roomCode = code.trim();
   initPeer('join');
 }
 
-// ---- Peer Initialization & Reconnection ----
 function initPeer(mode) {
+  cleanupPeer();
   setStatus(mode, 'Connecting to signaling server...');
   
-  if (peer) {
-    peer.destroy();
-  }
-
-  // Create new Peer instance
   peer = new Peer(undefined, PEER_CONFIG);
 
   peer.on('open', id => {
-    reconnectAttempts = 0;
     myPeerId = id;
+    startHeartbeat();
     
     if (mode === 'host') {
       roomCode = id;
       const codeText = document.getElementById('room-code-text');
-      const codeDisplay = document.getElementById('room-code-display');
       if (codeText) codeText.textContent = id;
-      if (codeDisplay) codeDisplay.classList.remove('hidden');
-      setStatus('host', 'Table live. Share the code above.');
+      document.getElementById('room-code-display')?.classList.remove('hidden');
+      setStatus('host', 'Table live. Waiting for friends.');
       updateWaitingList([myName]);
       myPlayerId = 0;
     } else {
-      connectToHost(roomCode);
+      attemptConnection(roomCode);
     }
   });
 
@@ -93,52 +111,46 @@ function initPeer(mode) {
   });
 
   peer.on('disconnected', () => {
-    console.warn('Disconnected from signaling server. Attempting reconnect...');
-    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-      reconnectAttempts++;
-      peer.reconnect();
-    } else {
-      setStatus(isHost ? 'host' : 'join', 'Connection lost. Try clicking Host/Join again.');
-    }
+    console.log('Peer disconnected from server. Reconnecting...');
+    peer.reconnect();
   });
 
   peer.on('error', err => {
-    console.error('PeerJS Error:', err.type, err);
-    
+    console.error('PeerJS Error Type:', err.type);
     const target = isHost ? 'host' : 'join';
     
     if (err.type === 'network' || err.type === 'socket-error') {
-      setStatus(target, 'Network error. Signaling server is busy. Retrying in 3s...');
-      setTimeout(() => {
-        if (!peer || peer.destroyed || !peer.open) initPeer(mode);
-      }, 3000);
+      setStatus(target, 'Network busy. Retrying connection...');
+      setTimeout(() => { if (!peer || peer.destroyed) initPeer(mode); }, 3000);
     } else if (err.type === 'peer-not-found') {
-      setStatus('join', 'Room code not found. Double check the code.');
-    } else if (err.type === 'unavailable-id') {
-      setStatus(target, 'ID unavailable. Try again.');
+      setStatus('join', 'Room code not found. Check the code and try again.');
     } else {
-      setStatus(target, `Error: ${err.type}.`);
+      setStatus(target, `Status: ${err.type}`);
     }
   });
 }
 
-function connectToHost(hostId) {
-  setStatus('join', `Joining table ${hostId}...`);
-  const conn = peer.connect(hostId, { 
-    metadata: { name: myName },
-    reliable: true 
-  });
+function attemptConnection(hostId) {
+  setStatus('join', `Contacting table ${hostId}...`);
   
-  conn.on('open', () => {
-    connections[hostId] = conn;
-    conn.send({ type: 'join', name: myName });
-    setStatus('join', 'Connected! Waiting for host...');
-    setupClientListeners(conn);
+  const conn = peer.connect(hostId, {
+    metadata: { name: myName },
+    reliable: true
   });
 
-  conn.on('error', err => {
-    console.error('Connection Error:', err);
-    setStatus('join', 'Failed to handshake with host.');
+  // Timeout for connection
+  const connTimeout = setTimeout(() => {
+    if (!connections[hostId]) {
+      setStatus('join', 'Connection timed out. Host might be offline.');
+    }
+  }, 10000);
+
+  conn.on('open', () => {
+    clearTimeout(connTimeout);
+    connections[hostId] = conn;
+    conn.send({ type: 'join', name: myName });
+    setStatus('join', 'Connected! Waiting for host to start...');
+    setupClientListeners(conn);
   });
 }
 
@@ -146,14 +158,13 @@ function connectToHost(hostId) {
 function handleHostConnection(conn) {
   conn.on('data', data => {
     if (data.type === 'join') {
-      const pName = data.name || 'Unknown';
-      conn.metadata = { name: pName };
+      conn.metadata = { name: data.name || 'Anonymous' };
       connections[conn.peer] = conn;
-      systemChat(`${pName} joined.`);
+      systemChat(`${conn.metadata.name} joined the table.`);
       
-      const playerNames = [myName, ...Object.values(connections).map(c => c.metadata.name)];
-      updateWaitingList(playerNames);
-      broadcastAll({ type: 'lobby_update', names: playerNames });
+      const names = [myName, ...Object.values(connections).map(c => c.metadata.name)];
+      updateWaitingList(names);
+      broadcastAll({ type: 'lobby_update', names });
     } else if (data.type === 'chat') {
       const author = getPlayerNameByPeerId(conn.peer);
       broadcastAll({ type: 'chat', author, msg: data.msg });
@@ -166,10 +177,10 @@ function handleHostConnection(conn) {
   conn.on('close', () => {
     const pName = getPlayerNameByPeerId(conn.peer);
     delete connections[conn.peer];
-    systemChat(`${pName} left.`);
-    const playerNames = [myName, ...Object.values(connections).map(c => c.metadata.name)];
-    updateWaitingList(playerNames);
-    broadcastAll({ type: 'lobby_update', names: playerNames });
+    systemChat(`${pName} left the game.`);
+    const names = [myName, ...Object.values(connections).map(c => c.metadata.name)];
+    updateWaitingList(names);
+    broadcastAll({ type: 'lobby_update', names });
   });
 }
 
@@ -189,12 +200,12 @@ function setupClientListeners(conn) {
   });
 
   conn.on('close', () => {
-    systemChat('Lost connection to host.');
+    systemChat('The host closed the connection.');
     setTimeout(() => location.reload(), 3000);
   });
 }
 
-// ---- UI Helpers ----
+// ---- Utility & Game Logic Hooks ----
 function setStatus(tab, msg) {
   const el = document.getElementById(`status-msg-${tab}`);
   if (el) el.textContent = msg;
@@ -209,16 +220,13 @@ function updateWaitingList(names) {
     li.textContent = n;
     list.appendChild(li);
   });
-  
-  if (isHost) {
-    const startBtn = document.getElementById('start-btn-container');
-    if (startBtn) startBtn.classList.remove('hidden');
+  if (isHost && names.length >= 1) {
+    document.getElementById('start-btn-container')?.classList.remove('hidden');
   }
 }
 
 function getPlayerNameByPeerId(pid) {
-  const conn = connections[pid];
-  return (conn && conn.metadata) ? conn.metadata.name : 'Unknown';
+  return (connections[pid] && connections[pid].metadata) ? connections[pid].metadata.name : 'Unknown';
 }
 
 function broadcastAll(data) {
@@ -228,8 +236,9 @@ function broadcastAll(data) {
 }
 
 // ============================================================
-// GAME LOGIC (Simplified for Single-File robustness)
+// CORE POKER ENGINE
 // ============================================================
+// (Logic for deck, shuffling, stages, blinds, and rendering)
 
 const SUITS = ['s', 'h', 'd', 'c'];
 const RANKS = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
@@ -305,10 +314,7 @@ function startRound() {
   gameState.turnIdx = (bbIdx + 1) % gameState.players.length;
   gameState.lastRaiser = bbIdx;
 
-  if (isHost) {
-    renderGame();
-    syncGame();
-  }
+  if (isHost) { renderGame(); syncGame(); }
 }
 
 function postBlind(idx, amt) {
@@ -339,9 +345,7 @@ function startGameUI(state) {
   renderGame();
 }
 
-function syncGame() {
-  broadcastAll({ type: 'game_update', state: gameState });
-}
+function syncGame() { broadcastAll({ type: 'game_update', state: gameState }); }
 
 function playerAction(type) {
   if (gameState.turnIdx !== myPlayerId) return;
@@ -350,7 +354,6 @@ function playerAction(type) {
     val = parseInt(document.getElementById('raise-slider').value);
     closeRaise();
   }
-
   if (isHost) {
     processAction(myPlayerId, type, val);
   } else {
@@ -377,16 +380,12 @@ function processAction(pIdx, type, value) {
     systemChat(`${p.name} checks.`);
   } else if (type === 'call') {
     const amt = Math.min(p.chips, toCall);
-    p.chips -= amt;
-    p.bet += amt;
-    gameState.pot += amt;
+    p.chips -= amt; p.bet += amt; gameState.pot += amt;
     if (p.chips === 0) p.allIn = true;
     systemChat(`${p.name} calls.`);
   } else if (type === 'raise' || type === 'allin') {
     let amt = (type === 'allin') ? p.chips : value - p.bet;
-    p.chips -= amt;
-    p.bet += amt;
-    gameState.pot += amt;
+    p.chips -= amt; p.bet += amt; gameState.pot += amt;
     if (p.bet > gameState.currentBet) {
       gameState.currentBet = p.bet;
       gameState.lastRaiser = pIdx;
@@ -457,8 +456,7 @@ function renderGame() {
     commDiv.innerHTML = '';
     gameState.community.forEach(c => commDiv.appendChild(createCardUI(c)));
   }
-  const potEl = document.getElementById('pot-amount');
-  if (potEl) potEl.textContent = gameState.pot;
+  document.getElementById('pot-amount').textContent = gameState.pot;
 
   const container = document.getElementById('players-container');
   if (container) {
@@ -492,8 +490,7 @@ function renderGame() {
   }
 
   const isMyTurn = (gameState.turnIdx === myPlayerId && !gameState.players[myPlayerId].folded);
-  const controls = document.getElementById('controls-panel');
-  if (controls) controls.classList.toggle('active', isMyTurn);
+  document.getElementById('controls-panel')?.classList.toggle('active', isMyTurn);
   
   if (isMyTurn) {
     const me = gameState.players[myPlayerId];
