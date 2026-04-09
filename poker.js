@@ -11,14 +11,17 @@ let roomCode = '';
 let connections = {}; // peerId -> DataConnection
 let gameState = null;
 let myPlayerId = null; // seat index
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
 
 // PeerJS Configuration for Stability
+// Using the public PeerJS cloud server
 const PEER_CONFIG = {
   host: '0.peerjs.com',
   port: 443,
   path: '/',
   secure: true,
-  debug: 3 // Detailed logs for debugging connection issues
+  debug: 2 // 2 = Errors and Warnings
 };
 
 // ---- Tab switching ----
@@ -32,82 +35,132 @@ function switchTab(tab) {
 
 // ---- Lobby: Host ----
 function hostGame() {
-  const name = document.getElementById('host-name').value.trim();
+  const nameEl = document.getElementById('host-name');
+  const name = nameEl ? nameEl.value.trim() : '';
   if (!name) { setStatus('host', 'Please enter your name.'); return; }
+  
   myName = name;
   isHost = true;
+  initPeer('host');
+}
 
-  setStatus('host', 'Connecting to signaling server…');
+// ---- Lobby: Join ----
+function joinGame() {
+  const nameEl = document.getElementById('join-name');
+  const codeEl = document.getElementById('join-code');
+  const name = nameEl ? nameEl.value.trim() : '';
+  const code = codeEl ? codeEl.value.trim() : '';
   
-  // Cleanup previous peer if it exists
+  if (!name || !code) { setStatus('join', 'Enter name and room code.'); return; }
+
+  myName = name;
+  isHost = false;
+  roomCode = code;
+  initPeer('join');
+}
+
+// ---- Peer Initialization & Reconnection ----
+function initPeer(mode) {
+  setStatus(mode, 'Connecting to signaling server...');
+  
   if (peer) {
     peer.destroy();
   }
 
-  // Initialize Peer
+  // Create new Peer instance
   peer = new Peer(undefined, PEER_CONFIG);
 
   peer.on('open', id => {
+    reconnectAttempts = 0;
     myPeerId = id;
-    roomCode = id;
-    const codeDisplay = document.getElementById('room-code-text');
-    if (codeDisplay) codeDisplay.textContent = id;
     
-    const displayBox = document.getElementById('room-code-display');
-    if (displayBox) displayBox.classList.remove('hidden');
-    
-    setStatus('host', 'Table created. Waiting for players.');
-    updateWaitingList([name]);
-
-    // Host is player 0
-    myPlayerId = 0;
+    if (mode === 'host') {
+      roomCode = id;
+      const codeText = document.getElementById('room-code-text');
+      const codeDisplay = document.getElementById('room-code-display');
+      if (codeText) codeText.textContent = id;
+      if (codeDisplay) codeDisplay.classList.remove('hidden');
+      setStatus('host', 'Table live. Share the code above.');
+      updateWaitingList([myName]);
+      myPlayerId = 0;
+    } else {
+      connectToHost(roomCode);
+    }
   });
 
   peer.on('connection', conn => {
-    handleHostConnection(conn);
+    if (isHost) handleHostConnection(conn);
+  });
+
+  peer.on('disconnected', () => {
+    console.warn('Disconnected from signaling server. Attempting reconnect...');
+    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+      reconnectAttempts++;
+      peer.reconnect();
+    } else {
+      setStatus(isHost ? 'host' : 'join', 'Connection lost. Try clicking Host/Join again.');
+    }
   });
 
   peer.on('error', err => {
     console.error('PeerJS Error:', err.type, err);
-    if (err.type === 'network') {
-      setStatus('host', 'Network error: Lost connection to server. Retrying...');
-      // Brief delay before allowing manual retry or auto-reconnecting
+    
+    const target = isHost ? 'host' : 'join';
+    
+    if (err.type === 'network' || err.type === 'socket-error') {
+      setStatus(target, 'Network error. Signaling server is busy. Retrying in 3s...');
       setTimeout(() => {
-        if (isHost && !myPeerId) hostGame();
+        if (!peer || peer.destroyed || !peer.open) initPeer(mode);
       }, 3000);
+    } else if (err.type === 'peer-not-found') {
+      setStatus('join', 'Room code not found. Double check the code.');
+    } else if (err.type === 'unavailable-id') {
+      setStatus(target, 'ID unavailable. Try again.');
     } else {
-      setStatus('host', `Connection Error: ${err.type}. Please refresh.`);
+      setStatus(target, `Error: ${err.type}.`);
     }
-  });
-
-  peer.on('disconnected', () => {
-    console.log('Peer disconnected from signaling server. Attempting to reconnect...');
-    peer.reconnect();
   });
 }
 
-function handleHostConnection(conn) {
+function connectToHost(hostId) {
+  setStatus('join', `Joining table ${hostId}...`);
+  const conn = peer.connect(hostId, { 
+    metadata: { name: myName },
+    reliable: true 
+  });
+  
   conn.on('open', () => {
-    conn.on('data', data => {
-      if (data.type === 'join') {
-        const pName = data.name || 'Unknown';
-        connections[conn.peer] = conn;
-        // Store name in metadata for easier access
-        conn.metadata = { name: pName };
-        systemChat(`${pName} joined the lobby.`);
-        
-        // Sync lobby names to all
-        const playerNames = [myName, ...Object.values(connections).map(c => c.metadata.name)];
-        updateWaitingList(playerNames);
-        broadcastAll({ type: 'lobby_update', names: playerNames });
-      } else if (data.type === 'chat') {
-        const author = getPlayerNameByPeerId(conn.peer);
-        broadcastAll({ type: 'chat', author, msg: data.msg });
-        addChat(author, data.msg);
-      } else if (data.type === 'action') {
-        handlePlayerAction(conn.peer, data);
-      }
-    });
+    connections[hostId] = conn;
+    conn.send({ type: 'join', name: myName });
+    setStatus('join', 'Connected! Waiting for host...');
+    setupClientListeners(conn);
+  });
+
+  conn.on('error', err => {
+    console.error('Connection Error:', err);
+    setStatus('join', 'Failed to handshake with host.');
+  });
+}
+
+// ---- Data Handlers ----
+function handleHostConnection(conn) {
+  conn.on('data', data => {
+    if (data.type === 'join') {
+      const pName = data.name || 'Unknown';
+      conn.metadata = { name: pName };
+      connections[conn.peer] = conn;
+      systemChat(`${pName} joined.`);
+      
+      const playerNames = [myName, ...Object.values(connections).map(c => c.metadata.name)];
+      updateWaitingList(playerNames);
+      broadcastAll({ type: 'lobby_update', names: playerNames });
+    } else if (data.type === 'chat') {
+      const author = getPlayerNameByPeerId(conn.peer);
+      broadcastAll({ type: 'chat', author, msg: data.msg });
+      addChat(author, data.msg);
+    } else if (data.type === 'action') {
+      handlePlayerAction(conn.peer, data);
+    }
   });
 
   conn.on('close', () => {
@@ -120,62 +173,24 @@ function handleHostConnection(conn) {
   });
 }
 
-// ---- Lobby: Join ----
-function joinGame() {
-  const name = document.getElementById('join-name').value.trim();
-  const code = document.getElementById('join-code').value.trim();
-  if (!name || !code) { setStatus('join', 'Enter name and room code.'); return; }
-
-  myName = name;
-  isHost = false;
-  roomCode = code;
-
-  setStatus('join', 'Connecting to server…');
-  
-  if (peer) peer.destroy();
-  peer = new Peer(undefined, PEER_CONFIG);
-
-  peer.on('open', id => {
-    myPeerId = id;
-    setStatus('join', `Connecting to host ${code}…`);
-    
-    const conn = peer.connect(code, { metadata: { name: myName } });
-    
-    conn.on('open', () => {
-      connections[code] = conn;
-      conn.send({ type: 'join', name: myName });
-      setStatus('join', 'Joined! Waiting for host to start…');
-    });
-
-    conn.on('data', data => {
-      if (data.type === 'lobby_update') {
-        updateWaitingList(data.names);
-      } else if (data.type === 'chat') {
-        addChat(data.author, data.msg);
-      } else if (data.type === 'game_start') {
-        myPlayerId = data.yourId;
-        startGameUI(data.state);
-      } else if (data.type === 'game_update') {
-        gameState = data.state;
-        renderGame();
-      }
-    });
-
-    conn.on('close', () => {
-      systemChat('Connection to host closed.');
-      setTimeout(() => location.reload(), 3000);
-    });
+function setupClientListeners(conn) {
+  conn.on('data', data => {
+    if (data.type === 'lobby_update') {
+      updateWaitingList(data.names);
+    } else if (data.type === 'chat') {
+      addChat(data.author, data.msg);
+    } else if (data.type === 'game_start') {
+      myPlayerId = data.yourId;
+      startGameUI(data.state);
+    } else if (data.type === 'game_update') {
+      gameState = data.state;
+      renderGame();
+    }
   });
 
-  peer.on('error', err => {
-    console.error('Join Error:', err.type, err);
-    if (err.type === 'peer-not-found') {
-      setStatus('join', 'Error: Room code not found. Check the code.');
-    } else if (err.type === 'network') {
-      setStatus('join', 'Network error. Signaling server unreachable.');
-    } else {
-      setStatus('join', `Failed to connect: ${err.type}`);
-    }
+  conn.on('close', () => {
+    systemChat('Lost connection to host.');
+    setTimeout(() => location.reload(), 3000);
   });
 }
 
@@ -203,17 +218,17 @@ function updateWaitingList(names) {
 
 function getPlayerNameByPeerId(pid) {
   const conn = connections[pid];
-  return conn && conn.metadata ? conn.metadata.name : 'Unknown';
+  return (conn && conn.metadata) ? conn.metadata.name : 'Unknown';
 }
 
 function broadcastAll(data) {
   Object.values(connections).forEach(conn => {
-    if (conn.open) conn.send(data);
+    if (conn && conn.open) conn.send(data);
   });
 }
 
 // ============================================================
-// GAME LOGIC
+// GAME LOGIC (Simplified for Single-File robustness)
 // ============================================================
 
 const SUITS = ['s', 'h', 'd', 'c'];
@@ -222,9 +237,7 @@ const RANKS = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
 function createDeck() {
   let deck = [];
   for (let s of SUITS) {
-    for (let r of RANKS) {
-      deck.push({ rank: r, suit: s });
-    }
+    for (let r of RANKS) deck.push({ rank: r, suit: s });
   }
   return shuffle(deck);
 }
@@ -238,15 +251,13 @@ function shuffle(array) {
 }
 
 function initGameState() {
-  const chipsInput = document.getElementById('starting-chips');
-  const startChips = chipsInput ? parseInt(chipsInput.value) : 1000;
+  const startChips = parseInt(document.getElementById('starting-chips')?.value || 1000);
   const players = [];
-  
   players.push({ name: myName, chips: startChips, hole: [], bet: 0, folded: false, allIn: false, peerId: 'host' });
   
   Object.values(connections).forEach(conn => {
     players.push({ 
-      name: conn.metadata ? conn.metadata.name : 'Player', 
+      name: conn.metadata?.name || 'Player', 
       chips: startChips, 
       hole: [], 
       bet: 0, 
@@ -264,7 +275,6 @@ function initGameState() {
     stage: 'preflop',
     dealerIdx: 0,
     turnIdx: 0,
-    minRaise: 20,
     currentBet: 20,
     lastRaiser: -1,
     smallBlind: 10,
@@ -314,16 +324,11 @@ function hostStartGame() {
   if (!isHost) return;
   gameState = initGameState();
   startRound();
-  
   document.getElementById('lobby-screen').classList.remove('active');
   document.getElementById('game-screen').classList.add('active');
 
   Object.values(connections).forEach((conn, idx) => {
-    conn.send({ 
-      type: 'game_start', 
-      yourId: idx + 1, 
-      state: gameState 
-    });
+    conn.send({ type: 'game_start', yourId: idx + 1, state: gameState });
   });
 }
 
@@ -340,7 +345,6 @@ function syncGame() {
 
 function playerAction(type) {
   if (gameState.turnIdx !== myPlayerId) return;
-  
   let val = 0;
   if (type === 'raise') {
     val = parseInt(document.getElementById('raise-slider').value);
@@ -380,12 +384,9 @@ function processAction(pIdx, type, value) {
     systemChat(`${p.name} calls.`);
   } else if (type === 'raise' || type === 'allin') {
     let amt = (type === 'allin') ? p.chips : value - p.bet;
-    if (amt > p.chips) amt = p.chips;
-    
     p.chips -= amt;
     p.bet += amt;
     gameState.pot += amt;
-    
     if (p.bet > gameState.currentBet) {
       gameState.currentBet = p.bet;
       gameState.lastRaiser = pIdx;
@@ -393,7 +394,6 @@ function processAction(pIdx, type, value) {
     if (p.chips === 0) p.allIn = true;
     systemChat(`${p.name} ${type === 'allin' ? 'is All-In' : 'raises to ' + p.bet}.`);
   }
-
   nextTurn();
 }
 
@@ -404,13 +404,11 @@ function nextTurn() {
     nextIdx = (nextIdx + 1) % gameState.players.length;
     loops++;
   }
-
   if (nextIdx === gameState.lastRaiser || loops >= gameState.players.length - 1) {
     advanceStage();
   } else {
     gameState.turnIdx = nextIdx;
   }
-  
   renderGame();
   syncGame();
 }
@@ -419,7 +417,6 @@ function advanceStage() {
   gameState.players.forEach(p => p.bet = 0);
   gameState.currentBet = 0;
   gameState.lastRaiser = -1;
-
   if (gameState.stage === 'preflop') {
     gameState.stage = 'flop';
     gameState.community.push(gameState.deck.pop(), gameState.deck.pop(), gameState.deck.pop());
@@ -433,7 +430,6 @@ function advanceStage() {
     showdown();
     return;
   }
-
   let firstIdx = (gameState.dealerIdx + 1) % gameState.players.length;
   while (gameState.players[firstIdx].folded || gameState.players[firstIdx].allIn) {
     firstIdx = (firstIdx + 1) % gameState.players.length;
@@ -447,29 +443,20 @@ function showdown() {
   const winners = gameState.players.filter(p => !p.folded);
   if (winners.length > 0) {
     const winAmt = Math.floor(gameState.pot / winners.length);
-    winners.forEach(w => {
-      w.chips += winAmt;
-      systemChat(`${w.name} wins ${winAmt} chips!`);
-    });
+    winners.forEach(w => w.chips += winAmt);
   }
-
   gameState.dealerIdx = (gameState.dealerIdx + 1) % gameState.players.length;
-  
-  setTimeout(() => {
-    startRound();
-  }, 5000);
+  setTimeout(() => startRound(), 4000);
 }
 
 // ---- Rendering ----
 function renderGame() {
   if (!gameState) return;
-
   const commDiv = document.getElementById('community-cards');
   if (commDiv) {
     commDiv.innerHTML = '';
     gameState.community.forEach(c => commDiv.appendChild(createCardUI(c)));
   }
-
   const potEl = document.getElementById('pot-amount');
   if (potEl) potEl.textContent = gameState.pot;
 
@@ -480,19 +467,14 @@ function renderGame() {
       const isMe = (i === myPlayerId);
       const pDiv = document.createElement('div');
       pDiv.className = `player-slot ${gameState.turnIdx === i ? 'active' : ''} ${p.folded ? 'folded' : ''}`;
-      
       const angle = (i / gameState.players.length) * Math.PI * 2;
       const x = 50 + 40 * Math.cos(angle);
       const y = 50 + 35 * Math.sin(angle);
-      pDiv.style.left = `${x}%`;
-      pDiv.style.top = `${y}%`;
+      pDiv.style.left = `${x}%`; pDiv.style.top = `${y}%`;
 
       let cardsHtml = '';
       if (isMe || gameState.stage === 'showdown') {
-        p.hole.forEach(c => {
-          const card = createCardUI(c);
-          cardsHtml += card.outerHTML;
-        });
+        p.hole.forEach(c => cardsHtml += createCardUI(c).outerHTML);
       } else if (!p.folded) {
         cardsHtml = `<div class="card back"></div><div class="card back"></div>`;
       }
@@ -518,16 +500,11 @@ function renderGame() {
     const toCall = gameState.currentBet - me.bet;
     const callLabel = document.getElementById('call-amount-label');
     if (callLabel) callLabel.textContent = toCall > 0 ? `Call $${toCall}` : 'Check';
-    
-    const checkBtn = document.getElementById('btn-check');
-    if (checkBtn) checkBtn.classList.toggle('hidden', toCall > 0);
-    
-    const callBtn = document.getElementById('btn-call');
-    if (callBtn) callBtn.classList.toggle('hidden', toCall <= 0);
-    
+    document.getElementById('btn-check')?.classList.toggle('hidden', toCall > 0);
+    document.getElementById('btn-call')?.classList.toggle('hidden', toCall <= 0);
     const slider = document.getElementById('raise-slider');
     if (slider) {
-      slider.min = gameState.currentBet + gameState.bigBlind;
+      slider.min = gameState.currentBet + 20;
       slider.max = me.chips + me.bet;
       slider.value = slider.min;
       updateRaiseDisplay(slider.value);
@@ -539,50 +516,33 @@ function createCardUI(card) {
   const div = document.createElement('div');
   const isRed = (card.suit === 'h' || card.suit === 'd');
   div.className = `card ${isRed ? 'red' : ''}`;
-  
   const suitSymbols = { s: '♠', h: '♥', d: '♦', c: '♣' };
-  div.innerHTML = `
-    <div class="card-rank">${card.rank}</div>
-    <div class="card-suit">${suitSymbols[card.suit]}</div>
-  `;
+  div.innerHTML = `<div class="card-rank">${card.rank}</div><div class="card-suit">${suitSymbols[card.suit]}</div>`;
   return div;
 }
 
-function openRaise() {
-  const panel = document.getElementById('raise-panel');
-  if (panel) panel.classList.remove('hidden');
-}
-function closeRaise() {
-  const panel = document.getElementById('raise-panel');
-  if (panel) panel.classList.add('hidden');
-}
-function updateRaiseDisplay(val) {
+function openRaise() { document.getElementById('raise-panel')?.classList.remove('hidden'); }
+function closeRaise() { document.getElementById('raise-panel')?.classList.add('hidden'); }
+function updateRaiseDisplay(val) { 
   const display = document.getElementById('raise-display');
-  if (display) display.textContent = val;
+  if (display) display.textContent = val; 
 }
 
-// ============================================================
-// CHAT
-// ============================================================
+// ---- Chat ----
 function sendChat() {
   const input = document.getElementById('chat-input');
   if (!input) return;
   const msg = input.value.trim();
   if (!msg) return;
   input.value = '';
-
   if (isHost) {
     broadcastAll({ type: 'chat', author: myName, msg });
     addChat(myName, msg);
   } else {
     const hostConn = Object.values(connections)[0];
-    if (hostConn) {
-      hostConn.send({ type: 'chat', msg });
-      addChat(myName, msg);
-    }
+    if (hostConn) { hostConn.send({ type: 'chat', msg }); addChat(myName, msg); }
   }
 }
-
 function addChat(author, msg) {
   const log = document.getElementById('chat-log');
   if (!log) return;
@@ -592,7 +552,6 @@ function addChat(author, msg) {
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
 }
-
 function systemChat(msg) {
   const log = document.getElementById('chat-log');
   if (!log) return;
@@ -602,19 +561,14 @@ function systemChat(msg) {
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
 }
-
 function escHtml(str) {
   const p = document.createElement('p');
   p.textContent = str;
   return p.innerHTML;
 }
 
-// Handle enter key in chat
 document.addEventListener('DOMContentLoaded', () => {
-    const chatInput = document.getElementById('chat-input');
-    if (chatInput) {
-        chatInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') sendChat();
-        });
-    }
+    document.getElementById('chat-input')?.addEventListener('keypress', e => {
+      if (e.key === 'Enter') sendChat();
+    });
 });
