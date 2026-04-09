@@ -152,7 +152,9 @@ function joinGame() {
 
 // ---- UI Helpers ----
 function setStatus(tab, msg) {
-  document.getElementById(`status-${tab}`).textContent = msg;
+  // Fix: Use 'status-msg-' prefix to match index.html IDs
+  const el = document.getElementById(`status-msg-${tab}`);
+  if (el) el.textContent = msg;
 }
 
 function updateWaitingList(names) {
