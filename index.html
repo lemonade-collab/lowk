@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Texas Hold'em Poker</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.2/peerjs.min.js"></script>
+</head>
+<body>
+
+<!-- LOBBY SCREEN -->
+<div id="lobby-screen" class="screen active">
+  <div class="felt-bg"></div>
+  <div class="lobby-container">
+    <div class="logo">
+      <div class="logo-suits">♠ ♥ ♣ ♦</div>
+      <h1>ROYAL HOLD'EM</h1>
+      <p class="tagline">Texas Hold'em — Multiplayer</p>
+    </div>
+
+    <div class="lobby-card">
+      <div class="tab-row">
+        <button class="tab-btn active" onclick="switchTab('host')">Host Game</button>
+        <button class="tab-btn" onclick="switchTab('join')">Join Game</button>
+      </div>
+
+      <!-- HOST TAB -->
+      <div id="tab-host" class="tab-panel active">
+        <label>Your Name</label>
+        <input type="text" id="host-name" placeholder="Enter your name" maxlength="16" />
+        <label>Starting Chips</label>
+        <select id="starting-chips">
+          <option value="500">500</option>
+          <option value="1000" selected>1,000</option>
+          <option value="2000">2,000</option>
+          <option value="5000">5,000</option>
+        </select>
+        <label>Blind Level</label>
+        <select id="blind-level">
+          <option value="5,10">5 / 10</option>
+          <option value="10,20" selected>10 / 20</option>
+          <option value="25,50">25 / 50</option>
+          <option value="50,100">50 / 100</option>
+        </select>
+        <button class="btn-primary" onclick="hostGame()">Create Table</button>
+        <div id="host-status" class="status-msg"></div>
+        <div id="room-code-display" class="room-code-display hidden">
+          <p>Share this code with friends:</p>
+          <div class="code-box">
+            <span id="room-code-text"></span>
+            <button onclick="copyCode()" class="copy-btn">Copy</button>
+          </div>
+          <div id="waiting-players"></div>
+          <button id="start-game-btn" class="btn-primary hidden" onclick="startGameAsHost()">Start Game</button>
+        </div>
+      </div>
+
+      <!-- JOIN TAB -->
+      <div id="tab-join" class="tab-panel">
+        <label>Your Name</label>
+        <input type="text" id="join-name" placeholder="Enter your name" maxlength="16" />
+        <label>Room Code</label>
+        <input type="text" id="join-code" placeholder="Enter room code" maxlength="20" style="text-transform:uppercase" />
+        <button class="btn-primary" onclick="joinGame()">Join Table</button>
+        <div id="join-status" class="status-msg"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- GAME SCREEN -->
+<div id="game-screen" class="screen">
+  <div class="felt-bg"></div>
+
+  <!-- Top bar -->
+  <div class="top-bar">
+    <div class="top-bar-left">
+      <span class="logo-small">♠ ROYAL HOLD'EM</span>
+    </div>
+    <div class="top-bar-center">
+      <span id="game-phase-label" class="phase-label">Waiting...</span>
+    </div>
+    <div class="top-bar-right">
+      <span id="blinds-label" class="blinds-label"></span>
+    </div>
+  </div>
+
+  <!-- Table -->
+  <div class="table-wrapper">
+    <div class="poker-table">
+      <!-- Opponent seats (rendered dynamically) -->
+      <div id="opponent-seats" class="opponent-seats"></div>
+
+      <!-- Community cards -->
+      <div class="community-area">
+        <div class="pot-display">POT: <span id="pot-amount">0</span></div>
+        <div id="community-cards" class="community-cards"></div>
+        <div id="round-result" class="round-result hidden"></div>
+      </div>
+
+      <!-- Player seat -->
+      <div class="player-seat-area">
+        <div id="player-info-bar" class="player-info-bar">
+          <div class="player-name-chips">
+            <span id="my-name-label" class="my-name">You</span>
+            <span id="my-chips-label" class="chip-count">1000</span>
+          </div>
+          <div id="my-hole-cards" class="hole-cards"></div>
+          <div id="my-dealer-btn" class="dealer-btn hidden">D</div>
+          <div id="player-status-tag" class="player-status-tag"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Action Panel -->
+  <div id="action-panel" class="action-panel hidden">
+    <div class="action-info">
+      <span id="action-prompt">Your turn</span>
+      <span id="call-amount-label" class="call-info"></span>
+    </div>
+    <div class="action-btns">
+      <button id="btn-fold" class="action-btn fold" onclick="playerAction('fold')">Fold</button>
+      <button id="btn-check" class="action-btn check" onclick="playerAction('check')">Check</button>
+      <button id="btn-call" class="action-btn call" onclick="playerAction('call')">Call</button>
+      <button id="btn-raise" class="action-btn raise" onclick="openRaise()">Raise</button>
+      <button id="btn-allin" class="action-btn allin" onclick="playerAction('allin')">All In</button>
+    </div>
+    <div id="raise-panel" class="raise-panel hidden">
+      <input type="range" id="raise-slider" min="0" max="1000" value="0" oninput="updateRaiseDisplay(this.value)" />
+      <div class="raise-controls">
+        <span id="raise-display">0</span>
+        <button class="btn-primary small" onclick="playerAction('raise')">Confirm Raise</button>
+        <button class="btn-secondary small" onclick="closeRaise()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat -->
+  <div class="chat-container">
+    <div id="chat-log" class="chat-log"></div>
+    <div class="chat-input-row">
+      <input type="text" id="chat-input" placeholder="Chat..." maxlength="100" onkeydown="if(event.key==='Enter')sendChat()" />
+      <button onclick="sendChat()" class="chat-send">➤</button>
+    </div>
+  </div>
+</div>
+
+<script src="poker.js"></script>
+</body>
+</html>
