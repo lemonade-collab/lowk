@@ -166,11 +166,13 @@ select option { background: #0f3d1c; }
 .code-box {
   display: flex; align-items: center; justify-content: center; gap: 10px;
   background: rgba(0,0,0,0.3); border: 1px solid var(--gold-dark);
-  border-radius: 8px; padding: 12px 16px; margin-bottom: 12px;
+  border-radius: 8px; padding: 14px 20px; margin-bottom: 12px;
+  min-width: 200px;
 }
 #room-code-text {
-  font-family: 'Cinzel', serif; font-size: 1.4rem;
-  color: var(--gold-light); letter-spacing: 4px;
+  font-family: 'Cinzel', serif; font-size: 1.8rem;
+  color: var(--gold-light); letter-spacing: 6px;
+  font-weight: 700;
 }
 .copy-btn {
   background: rgba(201,168,76,0.2); border: 1px solid var(--gold-dark);
