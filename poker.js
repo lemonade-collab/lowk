@@ -15,15 +15,18 @@ let myPlayerId = null;      // seat index (0 = host)
 let pendingPlayers = [];    // [{peerId, name, seatIdx}]  (host pre-game)
 
 // ============================================================
-// SHORT 6-CHAR ROOM CODE
+// SHORT 5-CHAR ROOM CODE
 // PeerJS allows any string as the peer ID, so the host
-// registers using the short code directly. Much friendlier
-// than the default UUID.
+// registers using the short code directly.
 // ============================================================
 function generateShortCode() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
+  // Using 5 digits/chars. 
+  // Omitted 0, O, 1, I to prevent user confusion.
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; 
   let code = '';
-  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  for (let i = 0; i < 5; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
   return code;
 }
 
@@ -220,7 +223,6 @@ function setupClientConnHandlers(conn) {
         updateWaitingList(data.players.map(p => p.name));
         break;
       case 'game_start':
-        // Host is starting — switch to game screen immediately
         gameState = data.state;
         showGameScreen();
         renderGame();
@@ -260,7 +262,6 @@ function makeDeck() {
   return d;
 }
 
-// Called from HTML "Start Game" button
 function startGameAsHost() {
   if (pendingPlayers.length < 1) { alert('Need at least 1 other player to start.'); return; }
 
@@ -293,9 +294,7 @@ function startGameAsHost() {
     resultMessage: ''
   };
 
-  // Tell clients the game is starting (no hole cards yet)
   broadcastAll({ type: 'game_start', state: blankHoleState() });
-
   showGameScreen();
   startNewHand();
 }
@@ -315,20 +314,17 @@ function startNewHand() {
     p.bet = 0; p.totalBet = 0; p.folded = false; p.allIn = false; p.holeCards = [];
   });
 
-  // Rotate dealer
   if (gs.handNum > 1) gs.dealerIdx = nextSeat(gs.dealerIdx, gs);
 
-  // Deal hole cards
-  for (let round = 0; round < 2; round++) {
-    gs.players.forEach(p => p.holeCards.push(gs.deck.pop()));
-  }
-
-  // Post blinds
   const sbIdx = nextSeat(gs.dealerIdx, gs);
   const bbIdx = nextSeat(sbIdx, gs);
   forceBet(sbIdx, gs.sb);
   forceBet(bbIdx, gs.bb);
   gs.currentBet = gs.bb;
+
+  for (let round = 0; round < 2; round++) {
+    gs.players.forEach(p => p.holeCards.push(gs.deck.pop()));
+  }
 
   gs.phase = 'preflop';
   gs.activeIdx = nextSeat(bbIdx, gs);
@@ -356,13 +352,10 @@ function forceBet(idx, amount) {
   if (p.chips === 0) p.allIn = true;
 }
 
-// ---- Action handling ----
 function handlePlayerAction(fromPeerId, data) {
   const gs = gameState;
   const acting = gs.players[gs.activeIdx];
-  if (!acting) return;
-  // Security: verify it's actually this player's turn
-  if (acting.peerId !== fromPeerId) return;
+  if (!acting || acting.peerId !== fromPeerId) return;
   applyAction(gs.activeIdx, data.action, data.amount || 0);
 }
 
@@ -375,11 +368,9 @@ function applyAction(pIdx, action, amount) {
       p.folded = true;
       systemChat(`${p.name} folds.`);
       break;
-
     case 'check':
       systemChat(`${p.name} checks.`);
       break;
-
     case 'call': {
       const toCall = Math.min(gs.currentBet - p.bet, p.chips);
       p.chips -= toCall; p.bet += toCall; p.totalBet += toCall; gs.pot += toCall;
@@ -387,7 +378,6 @@ function applyAction(pIdx, action, amount) {
       systemChat(`${p.name} calls ${toCall}.`);
       break;
     }
-
     case 'raise': {
       const raiseBy = Math.max(amount, gs.minRaise);
       const newBetTotal = gs.currentBet + raiseBy;
@@ -402,7 +392,6 @@ function applyAction(pIdx, action, amount) {
       systemChat(`${p.name} raises to ${p.bet}.`);
       break;
     }
-
     case 'allin': {
       const aiAmt = p.chips;
       const newBet = p.bet + aiAmt;
@@ -435,14 +424,11 @@ function advanceAction() {
     return;
   }
 
-  // Find next player who can act
-  const n = gs.players.length;
-  let next = (gs.activeIdx + 1) % n;
-  for (let tries = 0; tries < n; tries++) {
+  let next = (gs.activeIdx + 1) % gs.players.length;
+  for (let tries = 0; tries < gs.players.length; tries++) {
     const p = gs.players[next];
     if (!p.folded && !p.allIn && p.chips > 0) break;
-    next = (next + 1) % n;
-    tries++;
+    next = (next + 1) % gs.players.length;
   }
   gs.activeIdx = next;
 
@@ -473,12 +459,10 @@ function advancePhase() {
     doShowdown(); return;
   }
 
-  // First to act after dealer
-  const n = gs.players.length;
-  let next2 = (gs.dealerIdx + 1) % n;
-  for (let tries = 0; tries < n; tries++) {
+  let next2 = (gs.dealerIdx + 1) % gs.players.length;
+  for (let tries = 0; tries < gs.players.length; tries++) {
     if (!gs.players[next2].folded && !gs.players[next2].allIn) break;
-    next2 = (next2 + 1) % n;
+    next2 = (next2 + 1) % gs.players.length;
   }
   gs.activeIdx = next2;
 
@@ -486,9 +470,7 @@ function advancePhase() {
   renderGame();
 }
 
-// ============================================================
-// HAND EVALUATION
-// ============================================================
+// Evaluation Logic ...
 function evalBestHand(cards) {
   const combos = [];
   const pick = (start, chosen) => {
@@ -563,11 +545,8 @@ function doShowdown() {
 
   setTimeout(() => {
     gs.players = gs.players.filter(p => p.chips > 0);
-    if (gs.players.length < 2) {
-      systemChat(`🎉 ${gs.players[0]?.name || 'Someone'} wins the game!`);
-    } else {
-      startNewHand();
-    }
+    if (gs.players.length < 2) systemChat(`🎉 ${gs.players[0]?.name || 'Someone'} wins!`);
+    else startNewHand();
   }, 4500);
 }
 
@@ -583,13 +562,10 @@ function awardPot(winners) {
   setTimeout(() => {
     gs.players = gs.players.filter(p => p.chips > 0);
     if (gs.players.length >= 2) startNewHand();
-    else systemChat(`🎉 ${gs.players[0]?.name} wins the game!`);
+    else systemChat(`🎉 ${gs.players[0]?.name} wins!`);
   }, 3500);
 }
 
-// ============================================================
-// STATE SYNC
-// ============================================================
 function blankHoleState() {
   return { ...gameState, players: gameState.players.map(p => ({ ...p, holeCards: [] })) };
 }
@@ -608,26 +584,16 @@ function stateFor(targetPeerId) {
 function pushStateToAll() {
   pendingPlayers.forEach(pp => {
     const conn = connections[pp.peerId];
-    if (conn && conn.open) {
-      conn.send({ type: 'state_update', state: stateFor(pp.peerId) });
-    }
+    if (conn && conn.open) conn.send({ type: 'state_update', state: stateFor(pp.peerId) });
   });
 }
 
-// ============================================================
-// SHOW GAME SCREEN
-// ============================================================
 function showGameScreen() {
   document.getElementById('lobby-screen').classList.remove('active');
   document.getElementById('game-screen').classList.add('active');
-  if (gameState) {
-    document.getElementById('blinds-label').textContent = `Blinds ${gameState.sb}/${gameState.bb}`;
-  }
+  if (gameState) document.getElementById('blinds-label').textContent = `Blinds ${gameState.sb}/${gameState.bb}`;
 }
 
-// ============================================================
-// RENDERING
-// ============================================================
 function renderGame() {
   if (!gameState) return;
   const gs = gameState;
@@ -636,16 +602,13 @@ function renderGame() {
   const phaseNames = { waiting:'Waiting', preflop:'Pre-Flop', flop:'Flop', turn:'Turn', river:'River', showdown:'Showdown' };
   document.getElementById('game-phase-label').textContent = phaseNames[gs.phase] || gs.phase;
   document.getElementById('pot-amount').textContent = gs.pot;
-  document.getElementById('blinds-label').textContent = `Blinds ${gs.sb}/${gs.bb}`;
 
-  // Community cards
   const commEl = document.getElementById('community-cards');
   commEl.innerHTML = '';
   for (let i = 0; i < 5; i++) {
     commEl.appendChild(gs.communityCards[i] ? makeCardEl(gs.communityCards[i]) : makePlaceholder());
   }
 
-  // Result overlay
   const resultEl = document.getElementById('round-result');
   if (gs.resultMessage && gs.phase === 'showdown') {
     resultEl.textContent = gs.resultMessage;
@@ -654,29 +617,23 @@ function renderGame() {
     resultEl.classList.add('hidden');
   }
 
-  // My hole cards
   const myHoleEl = document.getElementById('my-hole-cards');
   myHoleEl.innerHTML = '';
-  if (me && me.holeCards && me.holeCards.length) {
+  if (me && me.holeCards?.length) {
     me.holeCards.forEach(c => myHoleEl.appendChild(makeCardEl(c)));
   }
 
-  // My info bar
   if (me) {
     document.getElementById('my-name-label').textContent = me.name;
     document.getElementById('my-chips-label').textContent = me.chips;
     document.getElementById('player-info-bar').classList.toggle('active-player', gs.activeIdx === myPlayerId);
     document.getElementById('my-dealer-btn').classList.toggle('hidden', gs.dealerIdx !== myPlayerId);
-    const tag = document.getElementById('player-status-tag');
-    tag.textContent = me.folded ? 'FOLDED' : me.allIn ? 'ALL IN' : me.bet > 0 ? `Bet: ${me.bet}` : '';
+    document.getElementById('player-status-tag').textContent = me.folded ? 'FOLDED' : me.allIn ? 'ALL IN' : me.bet > 0 ? `Bet: ${me.bet}` : '';
   }
 
   renderOpponents(gs);
 
-  // Action panel
-  const myTurn = gs.activeIdx === myPlayerId
-    && gs.phase !== 'showdown' && gs.phase !== 'waiting'
-    && me && !me.folded && !me.allIn;
+  const myTurn = gs.activeIdx === myPlayerId && gs.phase !== 'showdown' && gs.phase !== 'waiting' && me && !me.folded && !me.allIn;
   document.getElementById('action-panel').classList.toggle('hidden', !myTurn);
 
   if (myTurn && me) {
@@ -684,52 +641,40 @@ function renderGame() {
     document.getElementById('btn-check').disabled = toCall > 0;
     document.getElementById('btn-call').disabled = toCall <= 0;
     document.getElementById('btn-call').textContent = toCall > 0 ? `Call ${toCall}` : 'Call';
-    document.getElementById('call-amount-label').textContent = toCall > 0 ? `To call: ${toCall}` : 'No bet yet';
-
     const slider = document.getElementById('raise-slider');
     const minR = gs.currentBet + gs.minRaise - me.bet;
     slider.min = Math.max(1, Math.min(minR, me.chips));
     slider.max = me.chips;
     if (+slider.value < +slider.min) slider.value = slider.min;
     updateRaiseDisplay(slider.value);
-
-    document.getElementById('btn-raise').disabled = me.chips <= 0;
-    document.getElementById('btn-allin').disabled = me.chips <= 0;
   }
 }
-
-const SEAT_POSITIONS = [
-  { top: '-72px',    left: '50%',   transform: 'translateX(-50%)' },
-  { top: '5%',       right: '-80px', transform: 'none' },
-  { bottom: '5%',    right: '-80px', transform: 'none' },
-  { bottom: '-72px', left: '30%',   transform: 'none' },
-  { bottom: '-72px', right: '30%',  transform: 'none' },
-  { top: '5%',       left: '-80px', transform: 'none' },
-  { bottom: '5%',    left: '-80px', transform: 'none' },
-];
-
-const AVATARS = ['🎩','🃏','🎰','🦊','🐉','🎭','🎪','👑'];
 
 function renderOpponents(gs) {
   const container = document.getElementById('opponent-seats');
   container.innerHTML = '';
   let slot = 0;
+  const posList = [
+    { top: '-72px', left: '50%', transform: 'translateX(-50%)' },
+    { top: '5%', right: '-80px' },
+    { bottom: '5%', right: '-80px' },
+    { bottom: '-72px', left: '30%' },
+    { bottom: '-72px', right: '30%' },
+    { top: '5%', left: '-80px' },
+    { bottom: '5%', left: '-80px' }
+  ];
+  const AVATARS = ['🎩','🃏','🎰','🦊','🐉','🎭','🎪','👑'];
 
   gs.players.forEach((p, i) => {
     if (i === myPlayerId) return;
-    const pos = SEAT_POSITIONS[slot % SEAT_POSITIONS.length];
-    slot++;
-
+    const pos = posList[slot++ % posList.length];
     const seat = document.createElement('div');
     seat.className = 'opponent-seat';
     Object.assign(seat.style, pos);
 
     const av = document.createElement('div');
-    av.className = 'opp-avatar'
-      + (gs.activeIdx === i ? ' active-player' : '')
-      + (p.folded ? ' folded' : '');
+    av.className = 'opp-avatar' + (gs.activeIdx === i ? ' active-player' : '') + (p.folded ? ' folded' : '');
     av.textContent = AVATARS[i % AVATARS.length];
-
     if (gs.dealerIdx === i) {
       const dm = document.createElement('div');
       dm.className = 'dealer-marker'; dm.textContent = 'D';
@@ -738,42 +683,27 @@ function renderOpponents(gs) {
 
     const nm = document.createElement('div'); nm.className = 'opp-name'; nm.textContent = p.name;
     const ch = document.createElement('div'); ch.className = 'opp-chips'; ch.textContent = '₪ ' + p.chips;
-
-    const hc = document.createElement('div');
-    hc.className = 'opp-hole-cards';
-    if (p.holeCards && p.holeCards.length > 0) {
-      const faceDown = gs.phase !== 'showdown' || p.folded;
-      p.holeCards.forEach(c => hc.appendChild(makeCardSmEl(c, faceDown)));
+    const hc = document.createElement('div'); hc.className = 'opp-hole-cards';
+    if (p.holeCards?.length) {
+      const fd = gs.phase !== 'showdown' || p.folded;
+      p.holeCards.forEach(c => hc.appendChild(makeCardSmEl(c, fd)));
     } else if (!p.folded && gs.phase !== 'waiting') {
       hc.appendChild(makeCardSmEl(null, true));
       hc.appendChild(makeCardSmEl(null, true));
     }
 
-    seat.appendChild(av); seat.appendChild(nm); seat.appendChild(ch);
-    if (hc.children.length) seat.appendChild(hc);
-
+    seat.append(av, nm, ch, hc);
     if (p.bet > 0 && gs.phase !== 'showdown') {
       const bt = document.createElement('div'); bt.className = 'opp-bet'; bt.textContent = '+ ' + p.bet;
       seat.appendChild(bt);
     }
-    if (p.folded) {
-      const st = document.createElement('div'); st.className = 'opp-bet';
-      st.textContent = 'FOLDED'; st.style.color = '#f87171';
-      seat.appendChild(st);
-    } else if (p.allIn) {
-      const st = document.createElement('div'); st.className = 'opp-bet';
-      st.textContent = 'ALL IN'; st.style.color = '#c4b5fd';
-      seat.appendChild(st);
-    }
-
     container.appendChild(seat);
   });
 }
 
 function makePlaceholder() {
   const ph = document.createElement('div');
-  ph.className = 'card card-back';
-  ph.style.opacity = '0.18';
+  ph.className = 'card card-back'; ph.style.opacity = '0.18';
   return ph;
 }
 
@@ -784,28 +714,19 @@ function makeCardEl(card, faceDown = false) {
   el.className = 'card ' + (isRed ? 'red' : 'black');
   const rank = document.createElement('div'); rank.className = 'card-rank'; rank.textContent = card.r;
   const suit = document.createElement('div'); suit.className = 'card-suit'; suit.textContent = card.s;
-  el.appendChild(rank); el.appendChild(suit);
+  el.append(rank, suit);
   return el;
 }
 
 function makeCardSmEl(card, faceDown = false) {
-  const el = makeCardEl(card, faceDown);
-  el.classList.add('card-sm');
-  return el;
+  const el = makeCardEl(card, faceDown); el.classList.add('card-sm'); return el;
 }
 
-// ============================================================
-// PLAYER ACTIONS (from UI buttons)
-// ============================================================
 function playerAction(action) {
   if (!gameState || gameState.activeIdx !== myPlayerId) return;
   const amount = action === 'raise' ? (parseInt(document.getElementById('raise-display').textContent) || 0) : 0;
-
-  if (isHost) {
-    applyAction(myPlayerId, action, amount);
-  } else {
-    if (hostConn && hostConn.open) hostConn.send({ type: 'player_action', action, amount });
-  }
+  if (isHost) applyAction(myPlayerId, action, amount);
+  else if (hostConn?.open) hostConn.send({ type: 'player_action', action, amount });
   closeRaise();
 }
 
@@ -813,21 +734,13 @@ function openRaise()  { document.getElementById('raise-panel').classList.remove(
 function closeRaise() { document.getElementById('raise-panel').classList.add('hidden'); }
 function updateRaiseDisplay(val) { document.getElementById('raise-display').textContent = val; }
 
-// ============================================================
-// CHAT
-// ============================================================
 function sendChat() {
   const input = document.getElementById('chat-input');
   const msg = (input.value || '').trim();
   if (!msg) return;
   input.value = '';
-  if (isHost) {
-    broadcastAll({ type: 'chat', author: myName, msg });
-    addChat(myName, msg);
-  } else {
-    if (hostConn && hostConn.open) hostConn.send({ type: 'chat', msg });
-    addChat(myName, msg);
-  }
+  if (isHost) { broadcastAll({ type: 'chat', author: myName, msg }); addChat(myName, msg); }
+  else if (hostConn?.open) { hostConn.send({ type: 'chat', msg }); addChat(myName, msg); }
 }
 
 function addChat(author, msg) {
@@ -836,22 +749,17 @@ function addChat(author, msg) {
   const div = document.createElement('div');
   div.className = 'chat-msg';
   div.innerHTML = `<span class="chat-author">${escHtml(author)}:</span> ${escHtml(msg)}`;
-  log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
+  log.appendChild(div); log.scrollTop = log.scrollHeight;
 }
 
 function systemChat(msg) {
   const log = document.getElementById('chat-log');
   if (!log) return;
   const div = document.createElement('div');
-  div.className = 'chat-msg system';
-  div.textContent = msg;
-  log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
+  div.className = 'chat-msg system'; div.textContent = msg;
+  log.appendChild(div); log.scrollTop = log.scrollHeight;
 }
 
 function escHtml(str) {
-  return String(str)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
